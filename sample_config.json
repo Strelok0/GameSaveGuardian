@@ -1,0 +1,36 @@
+{
+  "config_version": 1,
+  "settings": {
+    "active_game": {
+      "name": "The Witcher 3: Wild Hunt",
+      "save_directory": "",
+      "backup_directory": ""
+    },
+    "games": [
+      {
+        "name": "The Witcher 3: Wild Hunt",
+        "save_directory": "",
+        "backup_directory": ""
+      }
+    ],
+    "backup_mode": "hybrid",
+    "archive_mode": "single_vault",
+    "scheduled_interval_minutes": 10,
+    "debounce_seconds": 3.0,
+    "stability_check_count": 3,
+    "compression_level": "deflated",
+    "retention": {
+      "enabled": true,
+      "max_count": 30,
+      "keep_all_days": 7,
+      "daily_snapshot_days": 30
+    },
+    "start_with_windows": false,
+    "minimize_to_tray": true,
+    "theme": "dark",
+    "language": "en",
+    "notifications_enabled": true,
+    "verbose_logging": false,
+    "first_run_completed": false
+  }
+}

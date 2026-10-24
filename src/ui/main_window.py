@@ -736,7 +736,7 @@ class MainWindow(QMainWindow):
         logger.info("Monitored game '%s' exited. Scheduling post-session safety backup and maintenance.", target_name)
         target_profile = next((g for g in self.settings.games if g.name == target_name), self.settings.active_game)
         self.trigger_backup(trigger=BackupTrigger.REALTIME, force=True, game_profile=target_profile)
-        if self.settings.archive_mode == ArchiveMode.SINGLE_VAULT.value:
+        if self.settings.get_archive_mode_for_game(target_profile) == ArchiveMode.SINGLE_VAULT.value:
             dest = self.settings.get_backup_dir_for_game(target_profile)
             vault_name = get_master_archive_filename(target_profile.name)
             vault_path = dest / vault_name

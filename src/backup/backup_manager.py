@@ -98,7 +98,7 @@ class BackupManager:
             if current_manifest.file_count == 0:
                 return False, f"No eligible save files found in {source_dir}", None
 
-            is_single_vault = (self.settings.archive_mode == ArchiveMode.SINGLE_VAULT.value)
+            is_single_vault = (self.settings.get_archive_mode_for_game(active_game) == ArchiveMode.SINGLE_VAULT.value)
             writer = ZipWriter(compression_level=self.settings.compression_level)
             backup_dir.mkdir(parents=True, exist_ok=True)
 
@@ -509,10 +509,11 @@ class BackupManager:
                 final_path.name, snapshot_manifest.file_count, archive_size, duration, summary
             )
 
-            if not is_single_vault and self.settings.retention.enabled:
+            game_retention = self.settings.get_retention_for_game(active_game)
+            if not is_single_vault and game_retention.enabled:
                 try:
                     all_recs = self.db.get_all_backups(game_name=active_game.name)
-                    ret_mgr = RetentionManager(self.settings.retention)
+                    ret_mgr = RetentionManager(game_retention)
                     ret_mgr.apply_retention(all_recs, self.db, protected_ids={record_id})
                 except Exception as e:
                     self.logger.warning("Retention pruning error: %s", e)

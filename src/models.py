@@ -159,18 +159,24 @@ class GameProfile:
     backup_directory: str = ""
     process_name: Optional[str] = None
     enabled: bool = True
+    archive_mode: Optional[str] = None
+    retention: Optional[RetentionPolicy] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> GameProfile:
+        ret_data = data.get("retention")
+        retention = RetentionPolicy.from_dict(ret_data) if (ret_data and isinstance(ret_data, dict)) else None
         return cls(
             name=data.get("name", "The Witcher 3: Wild Hunt"),
             save_directory=data.get("save_directory", ""),
             backup_directory=data.get("backup_directory", ""),
             process_name=data.get("process_name"),
             enabled=data.get("enabled", True),
+            archive_mode=data.get("archive_mode"),
+            retention=retention,
         )
 
 
@@ -222,6 +228,48 @@ class AppSettings:
         from src.utils.paths import get_default_backup_dir
         return get_default_backup_dir(name)
 
+    def get_archive_mode_for_game(self, game: Union[str, GameProfile, None] = None) -> str:
+        """
+        Return the archive mode for a specific game profile.
+        If the profile defines its own archive_mode, return it;
+        otherwise fall back to global AppSettings.archive_mode.
+        """
+        target_game: Optional[GameProfile] = None
+        if isinstance(game, GameProfile):
+            target_game = game
+        elif isinstance(game, str):
+            for g in self.games:
+                if g.name == game:
+                    target_game = g
+                    break
+        if target_game is None:
+            target_game = self.active_game
+
+        if target_game and target_game.archive_mode:
+            return target_game.archive_mode
+        return self.archive_mode
+
+    def get_retention_for_game(self, game: Union[str, GameProfile, None] = None) -> RetentionPolicy:
+        """
+        Return the retention policy for a specific game profile.
+        If the profile defines its own retention policy, return it;
+        otherwise fall back to global AppSettings.retention.
+        """
+        target_game: Optional[GameProfile] = None
+        if isinstance(game, GameProfile):
+            target_game = game
+        elif isinstance(game, str):
+            for g in self.games:
+                if g.name == game:
+                    target_game = g
+                    break
+        if target_game is None:
+            target_game = self.active_game
+
+        if target_game and target_game.retention is not None:
+            return target_game.retention
+        return self.retention
+
     def set_active_game(self, name: str) -> bool:
         """Switch active game to profile with the given name, ensuring shared reference."""
         for g in self.games:
@@ -247,6 +295,10 @@ class AppSettings:
                 if profile.process_name:
                     g.process_name = profile.process_name
                 g.enabled = profile.enabled
+                if profile.archive_mode:
+                    g.archive_mode = profile.archive_mode
+                if profile.retention is not None:
+                    g.retention = profile.retention
                 if self.active_game.name == profile.name:
                     self.active_game = g
                 return
@@ -262,6 +314,8 @@ class AppSettings:
         backup_directory: Optional[str] = None,
         process_name: Optional[str] = None,
         new_name: Optional[str] = None,
+        archive_mode: Optional[str] = None,
+        retention: Optional[RetentionPolicy] = None,
     ) -> None:
         """Update game profile attributes safely across games and active_game."""
         target: Optional[GameProfile] = None
@@ -282,6 +336,10 @@ class AppSettings:
             target.process_name = process_name.strip() or None
         if new_name and new_name.strip():
             target.name = new_name.strip()
+        if archive_mode is not None:
+            target.archive_mode = archive_mode
+        if retention is not None:
+            target.retention = retention
 
         if self.active_game.name == name or self.active_game.name == target.name:
             self.active_game = target
@@ -378,6 +436,16 @@ class AppSettings:
                 matched_in_games.backup_directory = active_game.backup_directory
             elif matched_in_games.backup_directory and not active_game.backup_directory:
                 active_game.backup_directory = matched_in_games.backup_directory
+
+            if active_game.archive_mode and not matched_in_games.archive_mode:
+                matched_in_games.archive_mode = active_game.archive_mode
+            elif matched_in_games.archive_mode and not active_game.archive_mode:
+                active_game.archive_mode = matched_in_games.archive_mode
+
+            if active_game.retention is not None and matched_in_games.retention is None:
+                matched_in_games.retention = active_game.retention
+            elif matched_in_games.retention is not None and active_game.retention is None:
+                active_game.retention = matched_in_games.retention
 
             active_game = matched_in_games
         else:

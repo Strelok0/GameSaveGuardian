@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 
 from src.backup.zip_writer import compact_vault, get_master_archive_filename
 from src.config import ConfigManager
-from src.models import AppSettings, GameProfile, ProtectionMode
+from src.models import AppSettings, GameProfile, ProtectionMode, RetentionPolicy
 from src.utils.i18n import get_language, set_language, tr
 from src.utils.logging_config import export_diagnostic_logs
 from src.utils.paths import (
@@ -109,6 +109,7 @@ class SettingsPage(QWidget):
         f_game.addRow("🎮 " + tr("field_game_name") + ":", profile_row)
 
         self.edit_game_name = QLineEdit(self.settings.active_game.name)
+        self.edit_game_name.textChanged.connect(lambda: self._update_retention_visibility())
         f_game.addRow(tr("field_game_name") + " (Display):", self.edit_game_name)
 
         # Source dir: Primary LineEdit + Browse button
@@ -315,14 +316,19 @@ class SettingsPage(QWidget):
 
     def _update_retention_visibility(self) -> None:
         is_single = (self.combo_archive_mode.currentData() == "single_vault")
+        game_title = self.edit_game_name.text().strip() if hasattr(self, "edit_game_name") else ""
+        if not game_title and hasattr(self, "settings") and self.settings.active_game:
+            game_title = self.settings.active_game.name
+        prefix = f"🎮 [{game_title}] " if game_title else ""
+
         if is_single:
-            self.retention_note_lbl.setText(tr("retention_hint_single_vault"))
+            self.retention_note_lbl.setText(f"{prefix}{tr('retention_hint_single_vault')}")
             self.chk_prune.setEnabled(False)
             self.spin_max_count.setEnabled(False)
             self.spin_keep_days.setEnabled(False)
             self.spin_daily_days.setEnabled(False)
         else:
-            self.retention_note_lbl.setText(tr("retention_hint_snapshots"))
+            self.retention_note_lbl.setText(f"{prefix}{tr('retention_hint_snapshots')}")
             self.chk_prune.setEnabled(True)
             enabled = self.chk_prune.isChecked()
             self.spin_max_count.setEnabled(enabled)
@@ -432,6 +438,23 @@ class SettingsPage(QWidget):
             self.edit_save_dir.setText("")
             self.edit_backup_dir.setText("")
             self.edit_game_name.setFocus()
+
+            # Set default archive mode and retention for a brand new profile
+            a_idx = self.combo_archive_mode.findData(self.settings.archive_mode)
+            if a_idx >= 0:
+                self.combo_archive_mode.blockSignals(True)
+                self.combo_archive_mode.setCurrentIndex(a_idx)
+                self.combo_archive_mode.blockSignals(False)
+
+            self.chk_prune.blockSignals(True)
+            self.chk_prune.setChecked(self.settings.retention.enabled)
+            self.chk_prune.blockSignals(False)
+
+            self.spin_max_count.setValue(self.settings.retention.max_count)
+            self.spin_keep_days.setValue(self.settings.retention.keep_all_days)
+            self.spin_daily_days.setValue(self.settings.retention.daily_snapshot_days)
+            self._update_retention_visibility()
+
             if hasattr(self, "btn_delete_profile"):
                 self.btn_delete_profile.setEnabled(False)
         elif data:
@@ -493,6 +516,27 @@ class SettingsPage(QWidget):
                 self.edit_backup_dir.setText(profile.backup_directory)
             self._update_unified_hint()
             self._check_disk_warning()
+
+            # Load profile-specific Archive Mode
+            arch_mode = self.settings.get_archive_mode_for_game(profile)
+            a_idx = self.combo_archive_mode.findData(arch_mode)
+            if a_idx >= 0:
+                self.combo_archive_mode.blockSignals(True)
+                self.combo_archive_mode.setCurrentIndex(a_idx)
+                self.combo_archive_mode.blockSignals(False)
+
+            # Load profile-specific Retention Policy
+            ret = self.settings.get_retention_for_game(profile)
+            self.chk_prune.blockSignals(True)
+            self.chk_prune.setChecked(ret.enabled)
+            self.chk_prune.blockSignals(False)
+
+            self.spin_max_count.setValue(ret.max_count)
+            self.spin_keep_days.setValue(ret.keep_all_days)
+            self.spin_daily_days.setValue(ret.daily_snapshot_days)
+
+            self._update_retention_visibility()
+
             if hasattr(self, "btn_delete_profile"):
                 self.btn_delete_profile.setEnabled(len(self.settings.games) > 1)
             if emit_switch and self.settings.active_game.name != game_name:
@@ -517,6 +561,14 @@ class SettingsPage(QWidget):
             QMessageBox.warning(self, "Game Title Missing", "Please specify a valid game title.")
             return
 
+        profile_archive_mode = self.combo_archive_mode.currentData()
+        profile_retention = RetentionPolicy(
+            enabled=self.chk_prune.isChecked(),
+            max_count=self.spin_max_count.value(),
+            keep_all_days=self.spin_keep_days.value(),
+            daily_snapshot_days=self.spin_daily_days.value(),
+        )
+
         is_unified = self.chk_use_unified_backup.isChecked()
         self.settings.use_unified_backup_dir = is_unified
 
@@ -537,7 +589,9 @@ class SettingsPage(QWidget):
                 name=target_name,
                 save_directory=src,
                 backup_directory=dest,
-                new_name=new_name if new_name else None
+                new_name=new_name if new_name else None,
+                archive_mode=profile_archive_mode,
+                retention=profile_retention,
             )
         else:
             if not dest:
@@ -549,22 +603,26 @@ class SettingsPage(QWidget):
                 name=target_name,
                 save_directory=src,
                 backup_directory=dest,
-                new_name=new_name if new_name else None
+                new_name=new_name if new_name else None,
+                archive_mode=profile_archive_mode,
+                retention=profile_retention,
             )
 
         self.settings.set_active_game(new_name or target_name)
 
         self.settings.backup_mode = self.combo_mode.currentData()
-        self.settings.archive_mode = self.combo_archive_mode.currentData()
+        self.settings.archive_mode = profile_archive_mode
         self.settings.scheduled_interval_minutes = self.spin_interval.value()
         self.settings.debounce_seconds = float(self.spin_debounce.value())
         self.settings.stability_check_count = self.spin_stability.value()
         self.settings.compression_level = self.combo_compression.currentData()
 
-        self.settings.retention.enabled = self.chk_prune.isChecked()
-        self.settings.retention.max_count = self.spin_max_count.value()
-        self.settings.retention.keep_all_days = self.spin_keep_days.value()
-        self.settings.retention.daily_snapshot_days = self.spin_daily_days.value()
+        self.settings.retention = RetentionPolicy(
+            enabled=self.chk_prune.isChecked(),
+            max_count=self.spin_max_count.value(),
+            keep_all_days=self.spin_keep_days.value(),
+            daily_snapshot_days=self.spin_daily_days.value(),
+        )
 
         # Enforce dark theme and English language as requested
         self.settings.theme = "dark"

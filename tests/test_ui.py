@@ -185,6 +185,64 @@ class TestUIComponents(unittest.TestCase):
         win.close()
 
     @patch.object(QMessageBox, "information")
+    def test_per_profile_archive_mode_and_retention(self, mock_info):
+        """SettingsPage properly loads, edits, and persists archive_mode and retention per profile."""
+        from src.models import RetentionPolicy
+
+        p1 = GameProfile(
+            name="Game Single Vault",
+            save_directory=str(self.base / "s1"),
+            backup_directory=str(self.base / "b1"),
+            archive_mode="single_vault",
+            retention=RetentionPolicy(enabled=False, max_count=20, keep_all_days=5, daily_snapshot_days=15)
+        )
+        p2 = GameProfile(
+            name="Game Snapshots",
+            save_directory=str(self.base / "s2"),
+            backup_directory=str(self.base / "b2"),
+            archive_mode="snapshots",
+            retention=RetentionPolicy(enabled=True, max_count=45, keep_all_days=10, daily_snapshot_days=60)
+        )
+        self.settings.games = [p1, p2]
+        self.settings.active_game = p1
+        self.config_mgr.save_config(self.settings)
+
+        settings_page = SettingsPage(self.config_mgr)
+
+        # 1. Check initial display for Profile 1 (Game Single Vault)
+        settings_page.set_active_game_profile("Game Single Vault")
+        self.assertEqual(settings_page.combo_archive_mode.currentData(), "single_vault")
+        self.assertFalse(settings_page.chk_prune.isChecked())
+        self.assertEqual(settings_page.spin_max_count.value(), 20)
+        self.assertIn("Game Single Vault", settings_page.retention_note_lbl.text())
+
+        # 2. Switch to Profile 2 (Game Snapshots)
+        settings_page.set_active_game_profile("Game Snapshots")
+        self.assertEqual(settings_page.combo_archive_mode.currentData(), "snapshots")
+        self.assertTrue(settings_page.chk_prune.isChecked())
+        self.assertEqual(settings_page.spin_max_count.value(), 45)
+        self.assertEqual(settings_page.spin_keep_days.value(), 10)
+        self.assertEqual(settings_page.spin_daily_days.value(), 60)
+        self.assertIn("Game Snapshots", settings_page.retention_note_lbl.text())
+
+        # 3. Modify Profile 2: change max_count to 50 and save
+        settings_page.spin_max_count.setValue(50)
+        settings_page._save_changes()
+
+        # 4. Re-read from disk and verify persistence and profile isolation
+        reloaded = self.config_mgr.load_config()
+        g1 = next(g for g in reloaded.games if g.name == "Game Single Vault")
+        g2 = next(g for g in reloaded.games if g.name == "Game Snapshots")
+
+        self.assertEqual(g1.archive_mode, "single_vault")
+        self.assertFalse(g1.retention.enabled)
+        self.assertEqual(g1.retention.max_count, 20)
+
+        self.assertEqual(g2.archive_mode, "snapshots")
+        self.assertTrue(g2.retention.enabled)
+        self.assertEqual(g2.retention.max_count, 50)
+
+    @patch.object(QMessageBox, "information")
     def test_unified_backup_directory_option(self, mock_msg):
         """Unified backup directory option sets subfolder per game and persists."""
         settings_page = SettingsPage(self.config_mgr)

@@ -198,6 +198,7 @@ class AppSettings:
     notifications_enabled: bool = True
     silent_gaming_mode: bool = True
     verbose_logging: bool = False
+    auto_heal_missing_saves: bool = True
     first_run_completed: bool = False
 
     def get_active_game(self) -> GameProfile:
@@ -416,5 +417,6 @@ class AppSettings:
             notifications_enabled=data.get("notifications_enabled", True),
             silent_gaming_mode=data.get("silent_gaming_mode", True),
             verbose_logging=data.get("verbose_logging", False),
+            auto_heal_missing_saves=data.get("auto_heal_missing_saves", True),
             first_run_completed=data.get("first_run_completed", False),
         )

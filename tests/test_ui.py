@@ -127,6 +127,7 @@ class TestUIComponents(unittest.TestCase):
         settings_page.edit_game_name.setText("Witcher 3 Modded")
         settings_page.spin_interval.setValue(15)
         settings_page.chk_windows_startup.setChecked(True)
+        settings_page.chk_auto_heal.setChecked(False)
         settings_page._save_changes()
 
         # Re-read from disk
@@ -134,6 +135,16 @@ class TestUIComponents(unittest.TestCase):
         self.assertEqual(saved.active_game.name, "Witcher 3 Modded")
         self.assertEqual(saved.scheduled_interval_minutes, 15)
         self.assertTrue(saved.start_with_windows)
+        self.assertFalse(saved.auto_heal_missing_saves)
+
+    def test_dashboard_auto_heal_button_and_signal(self):
+        """DashboardPage provides a Recover Missing Saves button and signal."""
+        dash = DashboardPage(self.settings)
+        self.assertTrue(hasattr(dash, "btn_auto_heal"))
+        received = []
+        dash.request_auto_heal.connect(lambda: received.append(True))
+        dash.btn_auto_heal.click()
+        self.assertEqual(len(received), 1)
 
     def test_setup_wizard_dialog_instantiation(self):
         """SetupWizardDialog initializes with all steps."""

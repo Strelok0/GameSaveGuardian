@@ -5,11 +5,12 @@ Includes Zip Slip prevention, staging verification, and automatic pre-restore sa
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import os
 from pathlib import Path
 import shutil
+import time
 from typing import Callable, Dict, List, Optional, Set, Tuple
 import uuid
 import zipfile
@@ -31,6 +32,15 @@ class RestorePreview:
     files_to_add: List[str]
     files_to_replace: List[str]
     files_untouched: List[str]
+
+
+@dataclass
+class AutoHealResult:
+    checked: bool
+    missing_found: int
+    restored_files: List[str] = field(default_factory=list)
+    failed_files: List[str] = field(default_factory=list)
+    message: str = ""
 
 
 class RestoreManager:
@@ -264,3 +274,167 @@ class RestoreManager:
                     shutil.rmtree(str(staging_dir), ignore_errors=True)
                 except Exception:
                     pass
+
+    def check_and_restore_missing_saves(
+        self,
+        save_dir: Path | str,
+        backup_path_or_dir: Path | str,
+        game_name: str = "",
+        dry_run: bool = False,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None
+    ) -> AutoHealResult:
+        """
+        Automatically verifies the original game save folder against backup archives.
+        If any save files present in the backup are missing in save_dir,
+        automatically restores ONLY those missing files without overwriting existing files.
+        """
+        target = Path(save_dir).resolve()
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            return AutoHealResult(
+                checked=False,
+                missing_found=0,
+                message=f"Cannot access save directory: {e}"
+            )
+
+        b_path = Path(backup_path_or_dir).resolve()
+        candidate_zips: List[Path] = []
+        if b_path.is_file() and b_path.suffix.lower() == ".zip":
+            candidate_zips.append(b_path)
+        elif b_path.is_dir():
+            from src.backup.zip_writer import get_master_archive_filename
+            master_zip = b_path / get_master_archive_filename(game_name)
+            if master_zip.is_file():
+                candidate_zips.append(master_zip)
+
+            other_zips = sorted(
+                [
+                    p for p in b_path.glob("*.zip")
+                    if not p.name.startswith("~") and not p.name.startswith("Safety_") and p != master_zip
+                ],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True
+            )
+            candidate_zips.extend(other_zips)
+
+        if not candidate_zips:
+            return AutoHealResult(
+                checked=True,
+                missing_found=0,
+                message="No backup archives found to verify against."
+            )
+
+        # Map relative path -> (archive_path, ZipInfo)
+        missing_entries: Dict[str, Tuple[Path, zipfile.ZipInfo]] = {}
+
+        for arch_path in candidate_zips:
+            try:
+                with zipfile.ZipFile(str(arch_path), "r") as zf:
+                    for info in zf.infolist():
+                        if info.filename == "_manifest.json" or info.is_dir() or info.filename.endswith("/") or info.filename.endswith("\\"):
+                            continue
+
+                        # Zip slip prevention
+                        is_safe, _ = is_safe_zip_path(info.filename, target)
+                        if not is_safe:
+                            continue
+
+                        rel_p = info.filename.replace("\\", "/")
+                        dest_file = target / rel_p
+
+                        # Crucial condition: ONLY if the file does NOT exist on disk!
+                        if dest_file.exists():
+                            continue
+
+                        if rel_p not in missing_entries:
+                            missing_entries[rel_p] = (arch_path, info)
+            except Exception as e:
+                logger.warning("Could not inspect archive %s during auto-heal scan: %s", arch_path.name, e)
+
+        total_missing = len(missing_entries)
+        if total_missing == 0:
+            return AutoHealResult(
+                checked=True,
+                missing_found=0,
+                message="All save files are verified and present in the original folder."
+            )
+
+        if dry_run:
+            return AutoHealResult(
+                checked=True,
+                missing_found=total_missing,
+                restored_files=list(missing_entries.keys()),
+                message=f"Found {total_missing} missing save file(s)."
+            )
+
+        # Extract only the missing files
+        restored_files: List[str] = []
+        failed_files: List[str] = []
+
+        archives_to_extract: Dict[Path, List[zipfile.ZipInfo]] = {}
+        for rel_p, (arch_p, info) in missing_entries.items():
+            archives_to_extract.setdefault(arch_p, []).append(info)
+
+        current_idx = 0
+        for arch_p, infos in archives_to_extract.items():
+            try:
+                with zipfile.ZipFile(str(arch_p), "r") as zf:
+                    for info in infos:
+                        dest_file = target / info.filename.replace("\\", "/")
+                        # Re-verify it doesn't exist
+                        if dest_file.exists():
+                            continue
+
+                        try:
+                            dest_file.parent.mkdir(parents=True, exist_ok=True)
+                            with zf.open(info, "r") as src_f, open(dest_file, "wb") as dst_f:
+                                shutil.copyfileobj(src_f, dst_f)
+
+                            # Restore original timestamp if present
+                            if info.date_time:
+                                try:
+                                    dt_val = time.mktime(datetime(*info.date_time).timetuple())
+                                    os.utime(str(dest_file), (dt_val, dt_val))
+                                except Exception:
+                                    pass
+
+                            restored_files.append(info.filename)
+                        except Exception as f_err:
+                            logger.error("Failed to restore missing file %s: %s", info.filename, f_err)
+                            failed_files.append(info.filename)
+
+                        current_idx += 1
+                        if progress_callback:
+                            pct = int((current_idx / max(1, total_missing)) * 100)
+                            progress_callback(pct, 100, f"Restoring missing save ({current_idx}/{total_missing})...")
+            except Exception as arch_err:
+                logger.error("Failed opening archive %s for missing files restore: %s", arch_p.name, arch_err)
+                for info in infos:
+                    if info.filename not in restored_files:
+                        failed_files.append(info.filename)
+
+        if restored_files:
+            logger.info(
+                "Auto-heal restored %d missing save files for '%s' to %s",
+                len(restored_files), game_name or "Game", target
+            )
+            sample_names = ", ".join(restored_files[:3])
+            if len(restored_files) > 3:
+                sample_names += f" (+{len(restored_files)-3} more)"
+            self.db.add_audit_log(
+                "AUTO_HEAL_RESTORED",
+                f"Auto-healed {len(restored_files)} missing saves for '{game_name}': {sample_names}"
+            )
+
+        msg = f"Successfully restored {len(restored_files)} missing save file(s)."
+        if failed_files:
+            msg += f" ({len(failed_files)} failed)"
+
+        return AutoHealResult(
+            checked=True,
+            missing_found=total_missing,
+            restored_files=restored_files,
+            failed_files=failed_files,
+            message=msg
+        )

@@ -133,6 +133,80 @@ class TestRestoreSystem(unittest.TestCase):
         self.assertIn("ManualSave_001.sav", preview.files_to_replace)
         self.assertIn("NewSave_999.sav", preview.files_to_add)
 
+    def test_auto_heal_restores_only_missing_files_without_overwriting(self):
+        """Test auto-heal restores only missing save files and preserves existing ones untouched."""
+        # 1. Existing save in active directory
+        existing_file = self.active_save_dir / "ManualSave_001.sav"
+        existing_file.write_bytes(b"LATEST_LOCAL_PROGRESS_DO_NOT_TOUCH")
+
+        # 2. Archive has ManualSave_001.sav (old version) + subfolder/nested.sav (missing)
+        result = self.restore_mgr.check_and_restore_missing_saves(
+            save_dir=self.active_save_dir,
+            backup_path_or_dir=self.archive_dir,
+            game_name="TestGame",
+            dry_run=False
+        )
+
+        self.assertTrue(result.checked)
+        self.assertEqual(result.missing_found, 1)
+        self.assertEqual(len(result.restored_files), 1)
+        self.assertIn("subfolder/nested.sav", [f.replace("\\", "/") for f in result.restored_files])
+
+        # Verify existing file was NOT overwritten
+        self.assertEqual(existing_file.read_bytes(), b"LATEST_LOCAL_PROGRESS_DO_NOT_TOUCH")
+
+        # Verify missing file WAS restored
+        restored_nested = self.active_save_dir / "subfolder" / "nested.sav"
+        self.assertTrue(restored_nested.is_file())
+        self.assertEqual(restored_nested.read_bytes(), b"RESTORED_NESTED_VERSION_1")
+
+    def test_auto_heal_when_all_files_present(self):
+        """Test auto-heal when all files in archive are already present in active directory."""
+        (self.active_save_dir / "ManualSave_001.sav").write_bytes(b"EXISTS_1")
+        (self.active_save_dir / "subfolder").mkdir(parents=True, exist_ok=True)
+        (self.active_save_dir / "subfolder" / "nested.sav").write_bytes(b"EXISTS_2")
+
+        result = self.restore_mgr.check_and_restore_missing_saves(
+            save_dir=self.active_save_dir,
+            backup_path_or_dir=self.archive_dir,
+            game_name="TestGame",
+            dry_run=False
+        )
+
+        self.assertTrue(result.checked)
+        self.assertEqual(result.missing_found, 0)
+        self.assertEqual(len(result.restored_files), 0)
+        self.assertIn("All save files are verified", result.message)
+
+    def test_auto_heal_dry_run(self):
+        """Test auto-heal dry run identifies missing files without writing to disk."""
+        # Active saves is empty, archive has 2 files
+        result = self.restore_mgr.check_and_restore_missing_saves(
+            save_dir=self.active_save_dir,
+            backup_path_or_dir=self.archive_dir,
+            game_name="TestGame",
+            dry_run=True
+        )
+
+        self.assertTrue(result.checked)
+        self.assertEqual(result.missing_found, 2)
+        # Should not have created files on disk
+        self.assertFalse((self.active_save_dir / "ManualSave_001.sav").exists())
+
+    def test_auto_heal_no_archives(self):
+        """Test auto-heal behavior when no backup archives exist."""
+        empty_dir = self.base / "empty_backups"
+        empty_dir.mkdir()
+
+        result = self.restore_mgr.check_and_restore_missing_saves(
+            save_dir=self.active_save_dir,
+            backup_path_or_dir=empty_dir,
+            game_name="TestGame"
+        )
+        self.assertTrue(result.checked)
+        self.assertEqual(result.missing_found, 0)
+        self.assertIn("No backup archives found", result.message)
+
 
 if __name__ == "__main__":
     unittest.main()

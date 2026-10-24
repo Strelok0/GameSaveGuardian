@@ -218,6 +218,11 @@ class SettingsPage(QWidget):
             self.combo_compression.setCurrentIndex(c_idx)
         f_mon.addRow(tr("field_compression") + ":", self.combo_compression)
 
+        self.chk_auto_heal = QCheckBox(tr("field_auto_heal"))
+        self.chk_auto_heal.setChecked(self.settings.auto_heal_missing_saves)
+        self.chk_auto_heal.setToolTip(tr("field_auto_heal_desc"))
+        f_mon.addRow("", self.chk_auto_heal)
+
         layout.addWidget(grp_mon)
 
         # 3. Retention Policies
@@ -568,6 +573,7 @@ class SettingsPage(QWidget):
         self.settings.start_with_windows = self.chk_windows_startup.isChecked()
         self.settings.minimize_to_tray = self.chk_minimize_tray.isChecked()
         self.settings.silent_gaming_mode = self.chk_silent_gaming.isChecked()
+        self.settings.auto_heal_missing_saves = self.chk_auto_heal.isChecked()
 
         # Handle Windows Startup registry entry
         self._set_windows_startup(self.settings.start_with_windows)

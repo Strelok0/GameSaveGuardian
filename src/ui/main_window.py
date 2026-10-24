@@ -43,7 +43,7 @@ from src.models import (
     ProtectionMode,
 )
 from src.monitoring.file_watcher import FileWatcher
-from src.restore.restore_manager import RestoreManager
+from src.restore.restore_manager import AutoHealResult, RestoreManager
 from src.ui.dashboard import DashboardPage
 from src.ui.history_page import HistoryPage
 from src.ui.restore_dialog import RestoreDialog
@@ -89,6 +89,38 @@ class BackupWorkerThread(QThread):
         self.finished.emit(ok, msg, record)
 
 
+class AutoHealWorkerThread(QThread):
+    """Executes save file verification and missing save restoration outside the UI thread."""
+
+    progress_updated = Signal(int, int, str)
+    finished = Signal(object)
+
+    def __init__(
+        self,
+        restore_manager: RestoreManager,
+        save_dir: str,
+        backup_dir: str,
+        game_name: str
+    ):
+        super().__init__()
+        self.mgr = restore_manager
+        self.save_dir = save_dir
+        self.backup_dir = backup_dir
+        self.game_name = game_name
+
+    def run(self):
+        def _prog(cur, tot, fpath):
+            self.progress_updated.emit(cur, tot, fpath)
+
+        res = self.mgr.check_and_restore_missing_saves(
+            save_dir=self.save_dir,
+            backup_path_or_dir=self.backup_dir,
+            game_name=self.game_name,
+            progress_callback=_prog
+        )
+        self.finished.emit(res)
+
+
 class MainWindow(QMainWindow):
     """Main application window for Game Save Guardian."""
 
@@ -104,6 +136,7 @@ class MainWindow(QMainWindow):
         self.restore_mgr = RestoreManager(self.db)
         self.file_watcher: Optional[FileWatcher] = None
         self.worker_thread: Optional[BackupWorkerThread] = None
+        self.auto_heal_thread: Optional[AutoHealWorkerThread] = None
         self._pending_backups: list[tuple[BackupTrigger, bool, Optional[GameProfile]]] = []
 
         self.protection_active = False
@@ -226,6 +259,7 @@ class MainWindow(QMainWindow):
         self.page_dashboard.request_resume_protection.connect(self._resume_protection)
         self.page_dashboard.request_backup_now.connect(lambda: self.trigger_backup(trigger=BackupTrigger.MANUAL, force=True))
         self.page_dashboard.request_open_restore.connect(self._on_dashboard_restore_requested)
+        self.page_dashboard.request_auto_heal.connect(lambda: self.check_and_auto_heal_saves(notify_if_clean=True))
         self.page_dashboard.request_open_backup_folder.connect(self._open_backup_folder)
         self.page_dashboard.request_open_settings.connect(lambda: self._on_nav_page_changed(2))
         self.page_dashboard.request_switch_game.connect(self._on_switch_active_game)
@@ -365,6 +399,10 @@ class MainWindow(QMainWindow):
         if last_rec is None and self.settings.active_game.save_directory and Path(self.settings.active_game.save_directory).is_dir():
             self.trigger_backup(trigger=BackupTrigger.INITIAL, force=False)
 
+        # Automated missing save files verification (Auto-Heal)
+        if self.settings.auto_heal_missing_saves:
+            QTimer.singleShot(1500, lambda: self.check_and_auto_heal_saves(notify_if_clean=False))
+
         self._refresh_metrics()
 
     def _pause_protection(self) -> None:
@@ -426,6 +464,8 @@ class MainWindow(QMainWindow):
             logger.info("Scheduled backup scan timer fired.")
             self._next_scan_seconds = self.settings.scheduled_interval_minutes * 60
             self.trigger_backup(trigger=BackupTrigger.SCHEDULED, force=False)
+            if self.settings.auto_heal_missing_saves:
+                QTimer.singleShot(2000, lambda: self.check_and_auto_heal_saves(notify_if_clean=False))
 
     def _on_countdown_tick(self) -> None:
         if self.protection_active and not self.protection_paused and self._next_scan_seconds > 0:
@@ -540,6 +580,102 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.information(self, "No Backups", "No successful backups available to restore.")
 
+    def check_and_auto_heal_saves(
+        self,
+        game_profile: Optional[GameProfile] = None,
+        notify_if_clean: bool = False
+    ) -> None:
+        """
+        Verify the original game save folder against backup archives and automatically restore
+        any missing save files without overwriting existing files.
+        Safely pauses the file watcher during restoration to prevent re-trigger loops.
+        """
+        if not self.settings.auto_heal_missing_saves and not notify_if_clean:
+            return
+
+        profile = game_profile or self.settings.active_game
+        if not profile or not profile.save_directory:
+            if notify_if_clean:
+                QMessageBox.warning(self, "Auto-Heal", "No valid save directory configured for this game.")
+            return
+
+        save_p = Path(profile.save_directory)
+        if not save_p.is_dir():
+            if notify_if_clean:
+                QMessageBox.warning(self, "Auto-Heal", f"Save directory not found: {save_p}")
+            return
+
+        backup_dir = str(self.settings.get_backup_dir_for_game(profile))
+
+        # Check if process is actively running: defer automated healing to avoid interfering with game process
+        from src.monitoring.file_watcher import check_is_process_running
+        proc_name = profile.process_name
+        if not proc_name:
+            from src.utils.paths import KNOWN_GAME_PROCESSES
+            proc_name = KNOWN_GAME_PROCESSES.get(profile.name.strip().lower())
+
+        if proc_name and check_is_process_running(proc_name) and not notify_if_clean:
+            logger.info("Monitored game '%s' is actively running. Deferring auto-heal until game exits.", profile.name)
+            return
+
+        if self.auto_heal_thread and self.auto_heal_thread.isRunning():
+            logger.info("Auto-heal check already in progress for %s. Skipping duplicate request.", profile.name)
+            return
+
+        # Temporarily pause file watcher to avoid reacting to our own restored save files
+        watcher_was_active = bool(self.file_watcher and self.file_watcher.is_running() and not self.file_watcher.is_paused())
+        if watcher_was_active and self.file_watcher:
+            self.file_watcher.pause()
+
+        self.auto_heal_thread = AutoHealWorkerThread(
+            restore_manager=self.restore_mgr,
+            save_dir=str(save_p),
+            backup_dir=backup_dir,
+            game_name=profile.name
+        )
+
+        def _on_finished(result: AutoHealResult):
+            # Give filesystem events 500ms to settle before resuming watcher
+            if watcher_was_active:
+                QTimer.singleShot(500, self._resume_watcher_after_heal)
+            self._on_auto_heal_completed(result, profile.name, notify_if_clean)
+
+        self.auto_heal_thread.finished.connect(_on_finished)
+        self.auto_heal_thread.start(QThread.LowPriority)
+
+    def _resume_watcher_after_heal(self) -> None:
+        if self.protection_active and not self.protection_paused and self.file_watcher:
+            self.file_watcher.resume()
+
+    def _on_auto_heal_completed(self, result: AutoHealResult, game_name: str, notify_if_clean: bool) -> None:
+        if result.restored_files:
+            count = len(result.restored_files)
+            logger.info("Auto-heal verified and restored %d missing save files for '%s'.", count, game_name)
+            self.notify(
+                "Game Save Guardian",
+                f"[{game_name}] Auto-Heal: Restored {count} missing save file(s) from backup!",
+                is_critical=False,
+                is_manual=notify_if_clean
+            )
+            self._refresh_metrics()
+            self.page_history.refresh_records()
+            if notify_if_clean:
+                sample_files = "\n".join(f"• {f}" for f in result.restored_files[:8])
+                if count > 8:
+                    sample_files += f"\n...and {count - 8} more"
+                QMessageBox.information(
+                    self,
+                    "Missing Saves Restored",
+                    f"Successfully restored {count} missing save file(s) for '{game_name}' from backup:\n\n{sample_files}"
+                )
+        else:
+            if notify_if_clean:
+                QMessageBox.information(
+                    self,
+                    "Save Verification",
+                    f"[{game_name}] All save files are verified and present in the original folder.\nNo missing files found in backup."
+                )
+
     def _open_backup_folder(self) -> None:
         dest = self.settings.get_backup_dir_for_game(self.settings.active_game)
         dest.mkdir(parents=True, exist_ok=True)
@@ -607,6 +743,9 @@ class MainWindow(QMainWindow):
             if vault_path.is_file():
                 check_and_compact_vault_if_needed(vault_path, threshold_ratio=0.25)
 
+        if self.settings.auto_heal_missing_saves:
+            QTimer.singleShot(3500, lambda: self.check_and_auto_heal_saves(target_profile, notify_if_clean=False))
+
     def _on_switch_active_game(self, game_name: str) -> None:
         """Switch active game profile globally across Dashboard, History, and Settings."""
         if not game_name or game_name == "all_games":
@@ -628,6 +767,8 @@ class MainWindow(QMainWindow):
             self.page_history.set_active_game_filter(game_name, sync_global=False)
             if hasattr(self, "page_settings"):
                 self.page_settings.set_active_game_profile(game_name, emit_switch=False)
+            if self.settings.auto_heal_missing_saves:
+                QTimer.singleShot(1000, lambda: self.check_and_auto_heal_saves(notify_if_clean=False))
 
     def _on_dashboard_compact_vault(self) -> None:
         """Manually compact master vault from dashboard."""

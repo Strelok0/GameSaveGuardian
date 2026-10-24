@@ -33,6 +33,7 @@ class DashboardPage(QWidget):
     request_stop_protection = Signal()
     request_backup_now = Signal()
     request_open_restore = Signal()
+    request_auto_heal = Signal()
     request_open_backup_folder = Signal()
     request_open_settings = Signal()
     request_switch_game = Signal(str)
@@ -117,6 +118,12 @@ class DashboardPage(QWidget):
         self.btn_restore.setProperty("class", "secondary-btn")
         self.btn_restore.clicked.connect(self.request_open_restore.emit)
         action_bar.addWidget(self.btn_restore)
+
+        self.btn_auto_heal = QPushButton("🛡️ " + tr("btn_auto_heal"))
+        self.btn_auto_heal.setProperty("class", "secondary-btn")
+        self.btn_auto_heal.setToolTip("Scan original save folder and restore any missing files from backup")
+        self.btn_auto_heal.clicked.connect(self.request_auto_heal.emit)
+        action_bar.addWidget(self.btn_auto_heal)
 
         self.btn_open_folder = QPushButton(tr("btn_open_folder"))
         self.btn_open_folder.setProperty("class", "secondary-btn")

@@ -239,6 +239,57 @@ class TestBackupEngine(unittest.TestCase):
         # Verify initial backup is intact
         self.assertTrue(Path(rec1.filepath).is_file())
 
+    def test_incremental_snapshots_mode_only_saves_new_files(self):
+        """Separate Snapshots mode only saves newly added or modified files, not a full re-copy."""
+        self.settings.archive_mode = "snapshots"
+
+        # 1. Baseline: 2 save files
+        (self.save_dir / "save1.sav").write_bytes(b"SAVE_FILE_1_BASE")
+        (self.save_dir / "save2.sav").write_bytes(b"SAVE_FILE_2_BASE")
+
+        ok1, msg1, rec1 = self.mgr.execute_backup(trigger=BackupTrigger.MANUAL, force=True)
+        self.assertTrue(ok1)
+        self.assertEqual(rec1.file_count, 2)
+        with zipfile.ZipFile(rec1.filepath, "r") as zf1:
+            self.assertIn("save1.sav", zf1.namelist())
+            self.assertIn("save2.sav", zf1.namelist())
+
+        # 2. Add 1 new file only
+        time.sleep(1.0)
+        (self.save_dir / "save3_new.sav").write_bytes(b"SAVE_FILE_3_NEW")
+
+        ok2, msg2, rec2 = self.mgr.execute_backup(trigger=BackupTrigger.MANUAL, force=False)
+        self.assertTrue(ok2)
+        self.assertIsNotNone(rec2)
+        self.assertEqual(rec2.file_count, 1)
+        self.assertIn("+1 new files", rec2.error_message)
+
+        # Inspect the second snapshot ZIP: it MUST contain ONLY save3_new.sav!
+        with zipfile.ZipFile(rec2.filepath, "r") as zf2:
+            names2 = [n for n in zf2.namelist() if n != "_manifest.json"]
+            self.assertEqual(names2, ["save3_new.sav"])
+            self.assertNotIn("save1.sav", zf2.namelist())
+            self.assertNotIn("save2.sav", zf2.namelist())
+
+        # 3. Third run without changes: redundant backup skipped
+        ok3, msg3, rec3 = self.mgr.execute_backup(trigger=BackupTrigger.MANUAL, force=False)
+        self.assertTrue(ok3)
+        self.assertIsNone(rec3)
+        self.assertIn("No changes detected", msg3)
+
+        # 4. Modify an existing file (save1.sav)
+        time.sleep(1.1)
+        (self.save_dir / "save1.sav").write_bytes(b"SAVE_FILE_1_MODIFIED_LONGER_CONTENT")
+        ok4, msg4, rec4 = self.mgr.execute_backup(trigger=BackupTrigger.MANUAL, force=False)
+        self.assertTrue(ok4)
+        self.assertIsNotNone(rec4)
+        self.assertEqual(rec4.file_count, 1)
+        with zipfile.ZipFile(rec4.filepath, "r") as zf4:
+            names4 = [n for n in zf4.namelist() if n != "_manifest.json"]
+            self.assertEqual(names4, ["save1.sav"])
+            self.assertNotIn("save2.sav", zf4.namelist())
+            self.assertNotIn("save3_new.sav", zf4.namelist())
+
 
 if __name__ == "__main__":
     unittest.main()

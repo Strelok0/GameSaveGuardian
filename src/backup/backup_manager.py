@@ -6,6 +6,7 @@ Performs atomic snapshots, integrity validation, change detection, and retention
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import os
 from pathlib import Path
 import shutil
@@ -247,15 +248,172 @@ class BackupManager:
                         self.logger.warning("Automated compaction check failed: %s", e)
 
                     return True, f"Updated {final_path.name} ({summary})", rec
+                else:
+                    # Initial creation of master vault archive containing all files in current_manifest
+                    required_space = max(current_manifest.total_size * 2, 20 * 1024 * 1024)
+                    free_space = get_disk_free_space(backup_dir)
+                    if free_space < required_space:
+                        err = (
+                            f"Insufficient disk space on backup destination. "
+                            f"Free: {free_space // (1024*1024)} MB, Required: {required_space // (1024*1024)} MB."
+                        )
+                        self.logger.error(err)
+                        return False, err, None
 
-            # --- TIMESTAMPED SNAPSHOTS OR INITIAL CREATION ---
-            # Incremental check: Skip if unchanged and not forced
-            if not force and not current_manifest.has_changed_from(self._latest_manifest):
-                self.logger.info("Save directory has not changed. Skipping redundant backup.")
-                return True, "No changes detected. Redundant backup skipped.", None
+                    ts_now = datetime.now()
+                    archive_filename = master_filename
 
-            # Disk space safety check
-            required_space = max(current_manifest.total_size * 2, 50 * 1024 * 1024)
+                    initial_record = BackupRecord(
+                        game_name=active_game.name,
+                        filename=archive_filename,
+                        filepath=str(backup_dir / archive_filename),
+                        timestamp=ts_now.isoformat(),
+                        size_bytes=0,
+                        file_count=current_manifest.file_count,
+                        trigger_type=trigger.value,
+                        status=BackupStatus.IN_PROGRESS.value,
+                        verification_status=VerificationStatus.UNVERIFIED.value,
+                        duration_seconds=0.0,
+                        manifest_json=current_manifest.to_json(),
+                    )
+                    record_id = self.db.add_backup(initial_record)
+
+                    temp_path, final_dest = writer.create_snapshot_archive(
+                        source_dir=source_dir,
+                        destination_dir=backup_dir,
+                        manifest=current_manifest,
+                        archive_name=archive_filename,
+                        progress_callback=progress_callback
+                    )
+
+                    is_valid, verify_msg = verify_zip_archive(temp_path, expected_manifest=current_manifest)
+                    if not is_valid:
+                        err_msg = f"Vault integrity verification failed: {verify_msg}"
+                        self.logger.error(err_msg)
+                        if temp_path.exists():
+                            temp_path.unlink()
+                        self.db.update_backup_status(
+                            record_id,
+                            BackupStatus.FAILED.value,
+                            VerificationStatus.VERIFIED_FAIL.value,
+                            error_message=err_msg
+                        )
+                        return False, err_msg, None
+
+                    if final_dest.exists():
+                        final_dest.unlink()
+                    temp_path.replace(final_dest)
+
+                    archive_sha256 = calculate_sha256(final_dest)
+                    archive_size = final_dest.stat().st_size
+                    duration = round(time.time() - start_time, 2)
+                    summary = f"Created master vault with {current_manifest.file_count} files"
+
+                    self.db.update_backup_status(
+                        record_id,
+                        BackupStatus.SUCCESS.value,
+                        VerificationStatus.VERIFIED_OK.value
+                    )
+                    completed_record = self.db.get_backup_by_id(record_id)
+                    if completed_record:
+                        completed_record.size_bytes = archive_size
+                        completed_record.sha256_hash = archive_sha256
+                        completed_record.duration_seconds = duration
+                        completed_record.error_message = summary
+                        with self.db._get_connection() as conn:
+                            conn.execute(
+                                "UPDATE backups SET size_bytes = ?, sha256_hash = ?, duration_seconds = ?, error_message = ? WHERE id = ?",
+                                (archive_size, archive_sha256, duration, summary, record_id)
+                            )
+                            conn.commit()
+
+                    self._latest_manifests[active_game.name] = current_manifest
+                    self._latest_manifest = current_manifest
+                    self.logger.info("Master vault created successfully: %s in %.2fs", final_dest.name, duration)
+                    return True, f"Vault created successfully: {final_dest.name}", completed_record
+
+            # --- TIMESTAMPED SEPARATE SNAPSHOTS (Incremental: Only New & Modified Files) ---
+            existing_zips = sorted(
+                [
+                    p for p in backup_dir.glob("*.zip")
+                    if not p.name.startswith("~") and not p.name.startswith("Safety_")
+                ],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True
+            )
+
+            # Build inventory of files already captured across all existing archives
+            # Mapping: norm_p -> (size, mtime)
+            known_files: dict[str, tuple[int, float]] = {}
+            for z_path in existing_zips:
+                try:
+                    with zipfile.ZipFile(str(z_path), "r") as zf:
+                        # Prefer high-precision manifest metadata if present
+                        if "_manifest.json" in zf.namelist():
+                            try:
+                                m_data = json.loads(zf.read("_manifest.json").decode("utf-8"))
+                                for rel_p, fdata in m_data.get("files", {}).items():
+                                    norm_p = rel_p.replace("\\", "/")
+                                    f_sz = fdata.get("size", 0)
+                                    f_mt = fdata.get("mtime", 0.0)
+                                    prev = known_files.get(norm_p)
+                                    if prev is None or f_mt > prev[1]:
+                                        known_files[norm_p] = (f_sz, f_mt)
+                                continue
+                            except Exception:
+                                pass
+
+                        # Fallback for archives without _manifest.json: read ZipInfo DOS time
+                        for info in zf.infolist():
+                            if info.filename == "_manifest.json" or info.is_dir() or info.filename.endswith("/"):
+                                continue
+                            norm_p = info.filename.replace("\\", "/")
+                            try:
+                                dt_epoch = datetime(*info.date_time).timestamp()
+                            except Exception:
+                                dt_epoch = 0.0
+                            prev = known_files.get(norm_p)
+                            if prev is None or dt_epoch > prev[1]:
+                                known_files[norm_p] = (info.file_size, dt_epoch)
+                except Exception:
+                    pass
+
+            new_files: list[str] = []
+            modified_files: list[str] = []
+
+            if not known_files:
+                # First backup ever for this game: baseline snapshot (all current save files)
+                new_files = list(current_manifest.files.keys())
+            else:
+                for rel_p, entry in current_manifest.files.items():
+                    norm_p = rel_p.replace("\\", "/")
+                    if norm_p not in known_files:
+                        new_files.append(rel_p)
+                    else:
+                        known_size, known_mtime = known_files[norm_p]
+                        if entry.size != known_size:
+                            modified_files.append(rel_p)
+                        elif entry.mtime - known_mtime > 1.0:
+                            modified_files.append(rel_p)
+
+            files_to_backup = new_files + modified_files
+
+            if len(files_to_backup) == 0:
+                self.logger.info("Snapshots: all save files are already captured across archives. Skipping redundant backup.")
+                if not force:
+                    return True, "No changes detected. Redundant backup skipped.", None
+                return True, "All save files are already backed up in existing archives.", None
+
+            # Incremental manifest containing ONLY the new and modified files
+            snapshot_manifest = FileManifest(
+                timestamp=current_manifest.timestamp,
+                files={p: current_manifest.files[p] for p in files_to_backup}
+            )
+            snapshot_manifest.file_count = len(snapshot_manifest.files)
+            snapshot_manifest.total_size = sum(f.size for f in snapshot_manifest.files.values())
+
+            # Disk space safety check for the files to be archived
+            required_space = max(snapshot_manifest.total_size * 2, 20 * 1024 * 1024)
             free_space = get_disk_free_space(backup_dir)
             if free_space < required_space:
                 err = (
@@ -267,10 +425,7 @@ class BackupManager:
 
             # Generate filename
             ts_now = datetime.now()
-            if is_single_vault:
-                archive_filename = get_master_archive_filename(active_game.name)
-            else:
-                archive_filename = generate_archive_filename(active_game.name, ts_now)
+            archive_filename = generate_archive_filename(active_game.name, ts_now)
 
             # Record initial entry in database
             initial_record = BackupRecord(
@@ -279,26 +434,26 @@ class BackupManager:
                 filepath=str(backup_dir / archive_filename),
                 timestamp=ts_now.isoformat(),
                 size_bytes=0,
-                file_count=current_manifest.file_count,
+                file_count=snapshot_manifest.file_count,
                 trigger_type=trigger.value,
                 status=BackupStatus.IN_PROGRESS.value,
                 verification_status=VerificationStatus.UNVERIFIED.value,
                 duration_seconds=0.0,
-                manifest_json=current_manifest.to_json(),
+                manifest_json=snapshot_manifest.to_json(),
             )
             record_id = self.db.add_backup(initial_record)
 
-            # Create temporary staging ZIP
+            # Create temporary staging ZIP containing ONLY new/modified files
             temp_path, final_path = writer.create_snapshot_archive(
                 source_dir=source_dir,
                 destination_dir=backup_dir,
-                manifest=current_manifest,
+                manifest=snapshot_manifest,
                 archive_name=archive_filename,
                 progress_callback=progress_callback
             )
 
             # Verify ZIP archive integrity BEFORE promoting
-            is_valid, verify_msg = verify_zip_archive(temp_path, expected_manifest=current_manifest)
+            is_valid, verify_msg = verify_zip_archive(temp_path, expected_manifest=snapshot_manifest)
             if not is_valid:
                 err_msg = f"Archive integrity verification failed: {verify_msg}"
                 self.logger.error(err_msg)
@@ -324,6 +479,9 @@ class BackupManager:
             archive_sha256 = calculate_sha256(final_path)
             archive_size = final_path.stat().st_size
             duration = round(time.time() - start_time, 2)
+            summary = f"+{len(new_files)} new files" if len(new_files) > 0 else f"{len(modified_files)} updated"
+            if len(new_files) > 0 and len(modified_files) > 0:
+                summary = f"+{len(new_files)} new, {len(modified_files)} updated"
 
             self.db.update_backup_status(
                 record_id,
@@ -336,18 +494,19 @@ class BackupManager:
                 completed_record.size_bytes = archive_size
                 completed_record.sha256_hash = archive_sha256
                 completed_record.duration_seconds = duration
+                completed_record.error_message = summary
                 with self.db._get_connection() as conn:
                     conn.execute(
-                        "UPDATE backups SET size_bytes = ?, sha256_hash = ?, duration_seconds = ? WHERE id = ?",
-                        (archive_size, archive_sha256, duration, record_id)
+                        "UPDATE backups SET size_bytes = ?, sha256_hash = ?, duration_seconds = ?, error_message = ? WHERE id = ?",
+                        (archive_size, archive_sha256, duration, summary, record_id)
                     )
                     conn.commit()
 
             self._latest_manifests[active_game.name] = current_manifest
             self._latest_manifest = current_manifest
             self.logger.info(
-                "Backup completed successfully: %s (%d files, %d bytes in %.2fs)",
-                final_path.name, current_manifest.file_count, archive_size, duration
+                "Incremental snapshot completed successfully: %s (%d files, %d bytes in %.2fs) [%s]",
+                final_path.name, snapshot_manifest.file_count, archive_size, duration, summary
             )
 
             if not is_single_vault and self.settings.retention.enabled:
@@ -358,7 +517,7 @@ class BackupManager:
                 except Exception as e:
                     self.logger.warning("Retention pruning error: %s", e)
 
-            return True, f"Backup created successfully: {final_path.name}", completed_record
+            return True, f"Snapshot created ({summary}): {final_path.name}", completed_record
 
         except Exception as e:
             self.logger.error("Unexpected error during backup: %s", e, exc_info=True)

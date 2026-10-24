@@ -139,7 +139,7 @@ class BackupRecord:
 
 @dataclass
 class RetentionPolicy:
-    enabled: bool = True
+    enabled: bool = False
     max_count: int = 30
     keep_all_days: int = 7
     daily_snapshot_days: int = 30

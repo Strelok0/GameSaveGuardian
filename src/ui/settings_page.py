@@ -322,7 +322,7 @@ class SettingsPage(QWidget):
             self.spin_keep_days.setEnabled(False)
             self.spin_daily_days.setEnabled(False)
         else:
-            self.retention_note_lbl.setText("")
+            self.retention_note_lbl.setText(tr("retention_hint_snapshots"))
             self.chk_prune.setEnabled(True)
             enabled = self.chk_prune.isChecked()
             self.spin_max_count.setEnabled(enabled)

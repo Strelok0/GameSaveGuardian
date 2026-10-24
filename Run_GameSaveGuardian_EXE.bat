@@ -13,5 +13,5 @@ if exist "dist_package\GameSaveGuardian\GameSaveGuardian.exe" (
 )
 
 echo [ERROR] GameSaveGuardian.exe not found.
-echo Please run build_windows.bat first.
+echo Please run build_windows.bat first to build the executable.
 pause

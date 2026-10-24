@@ -4,19 +4,23 @@ cd /d "%~dp0"
 
 echo Launching Game Save Guardian...
 
-if exist "C:\Users\dhirar\AppData\Local\Programs\Python\Python314\python.exe" (
-    "C:\Users\dhirar\AppData\Local\Programs\Python\Python314\python.exe" main.py
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" main.py
     goto end
 )
 
-py -3 main.py
-if %errorlevel% neq 0 (
-    python main.py
+py -3 main.py >nul 2>&1
+if %errorlevel% equ 0 (
+    py -3 main.py
+    goto end
 )
+
+python main.py
+if %errorlevel% equ 0 goto end
 
 :end
 if %errorlevel% neq 0 (
     echo.
-    echo An error occurred while launching.
+    echo An error occurred while launching Game Save Guardian.
     pause
 )

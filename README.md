@@ -3,7 +3,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://python.org)
 [![GUI](https://img.shields.io/badge/GUI-PySide6-green.svg)](https://wiki.qt.io/Qt_for_Python)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-lightgrey.svg)]()
-[![Tests](https://img.shields.io/badge/Tests-44%20Passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-53%20Passing-brightgreen.svg)]()
 
 **Game Save Guardian** is a robust, lightweight, local-first Windows desktop application engineered to protect video game save files from accidental loss caused by power outages, file corruption, game crashes, cloud-sync conflicts, or user error.
 
@@ -21,8 +21,20 @@ Built with **PySide6**, **SQLite (WAL mode)**, **Watchdog / Polling Watcher**, a
   - **Automated Vault Compaction:** Automatically reclaims dead unreferenced space when superseded save files exceed 25% of archive volume, with manual on-demand triggers in Dashboard and Settings.
   - **Zero-Compression Bypass (`ZIP_STORED`):** Pre-compressed assets (`.png`, `.jpg`, `.webp`) bypass recompression CPU cycles, preserving maximum gameplay framerate.
   - Automatically adopts any existing backup as the master vault on first run.
-- **Separate Timestamped Snapshots Mode:**
+- **Separate Incremental Snapshots Mode:**
   - Creates standalone timestamped snapshots (`Game_YYYY-MM-DD_HH-MM-SS.zip`) for users who prefer separate archive packages.
+  - **Incremental Delta Packaging:** Saves **only newly created or modified files** in each subsequent snapshot ZIP instead of duplicating entire past archives, drastically conserving disk space.
+  - Automatically skips redundant empty backups if game files have not changed.
+
+### 2. Automated Save Verification & Auto-Heal (Missing Saves Recovery)
+- **Automatic Health Scans:** Periodically verifies the live save directory upon application launch, game profile switch, and game process exit.
+- **Accidental Deletion & Loss Protection:** If any game save file is missing or deleted from the live directory, Game Save Guardian immediately detects the discrepancy and automatically restores the missing file from the newest verified backup archive.
+- **Zero-Overwrite Safety:** Never overwrites or modifies existing valid save files; strictly recovers only missing saves without triggering circular file-watcher loops.
+- **Manual Trigger:** One-click "🛡️ Recover Missing Saves" action available directly on the Dashboard.
+
+### 3. Per-Profile Archiving & Retention Configurations
+- **Independent Customization:** Each game profile can maintain its own specific archive storage mode (`Single Vault` or `Separate Snapshots`) and independent retention pruning rules.
+- **Visual Profile Badging:** Clear UI hints in Settings indicate which game profile is currently being configured, preventing accidental global overrides.
 
 ### 2. High-Performance & Zero Gameplay Impact (0% CPU, <25MB RAM)
 - **High-Speed Directory Scanning:** Uses low-overhead `os.scandir` routines capable of scanning 2,500+ save files in just **4.7 milliseconds**.
@@ -63,8 +75,8 @@ Built with **PySide6**, **SQLite (WAL mode)**, **Watchdog / Polling Watcher**, a
 ```
 game-save-guardian/
 ├── main.py                     # Primary executable entrypoint
-├── تشغيل_GameSaveGuardian.bat # One-click Arabic launcher
-├── Run_GameSaveGuardian.bat   # One-click launcher
+├── Run_GameSaveGuardian.bat       # One-click launcher (Python)
+├── Run_GameSaveGuardian_EXE.bat   # One-click launcher (Standalone EXE)
 ├── requirements.txt            # Python dependencies
 ├── build_windows.bat           # PyInstaller packaging script
 ├── setup_env.bat               # Automated environment bootstrap
